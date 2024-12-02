@@ -92,14 +92,27 @@ struct utf8_iterator
 template <std::size_t N>
 struct literal
 {
+	explicit constexpr literal(const char *s, int)
+	{
+		std::copy_n(s, N - 1, m_data);
+	}
+
 	constexpr literal(const char (&literal)[N])
 	{
-		std::copy_n(literal, N, m_data);
+		std::copy_n(literal, N - 1, m_data);
 	}
 
 	explicit constexpr operator std::string_view() const
 	{
-		return std::string_view(m_data, N-1);
+		return std::string_view(m_data, N - 1);
+	}
+
+	template <std::size_t Start, std::size_t Sz>
+	consteval auto substr() const
+	{
+		constexpr size_t sz = std::min(Sz, size());
+
+		return literal<sz - Start + 1>(m_data + Start, 0);
 	}
 
 	[[nodiscard]] static consteval std::size_t size() noexcept
@@ -108,7 +121,7 @@ struct literal
 	[[nodiscard]] consteval char* data() noexcept
 	{ return m_data; }
 
-	char m_data[N]; ///< Literal content @note Null terminated
+	char m_data[N - 1]; ///< Literal content
 
 	template <std::size_t M>
 		[[nodiscard]] constexpr friend bool operator==(const literal<N>& s, const literal<M>& t) noexcept
@@ -119,7 +132,7 @@ struct literal
 			return [&]<std::size_t... i>(std::index_sequence<i...>)
 			{
 				return ((s.m_data[i] == t.m_data[i]) && ...);
-			}(std::make_index_sequence<N>{});
+			}(std::make_index_sequence<N - 1>{});
 		}
 
 	[[nodiscard]] constexpr char& operator[](std::size_t i) noexcept
@@ -145,6 +158,12 @@ concept Rule = requires(T::state& state) {
 	//{ T::template match<I>(it, state) } -> std::same_as<std::optional<std::size_t>>;
 	//{ T::template match_result<I>(it, state) } -> std::same_as<std::optional<std::pair<std::size_t, typename T::result>>>;
 }; // concept Rule
+
+template <class T>
+concept NamedRule = requires(T::state& state) {
+	Rule<T>;
+	T::name;
+}; // concept NamedRule
 
 template <literal S>
 struct string_match {
@@ -266,7 +285,7 @@ struct any
 }; // struct any
 
 template <Rule R>
-struct noto
+struct exclude
 {
 	struct result {};
 	using state = typename R::state;
@@ -286,7 +305,7 @@ struct noto
 			return {};
 		return {{0, {}}};
 	}
-}; // struct not
+}; // struct exclude
 
 template <Rule C, std::size_t Min = 0, std::size_t Max = std::numeric_limits<size_t>::max()>
 struct repeat
@@ -384,6 +403,48 @@ struct maybe
 	}
 }; // struct maybe
 
+template <Rule R>
+struct ignore_result
+{
+	using state = typename R::state;
+	struct result {};
+
+	template<Iterator I>
+	static constexpr auto match(I it, state& state) -> std::optional<size_t>
+	{
+		return R::match(it, state);
+	}
+
+	template<Iterator I>
+	static constexpr auto match_result(I it, state& state) -> std::optional<std::pair<size_t, result>>
+	{
+		if (const auto res = R::match(it, state); res.has_value())
+			return std::make_pair(res.value(), result{});
+		return {};
+	}
+}; // struct ignore_result
+
+template <literal N, Rule R>
+struct named
+{
+	static constexpr inline auto Name = N;
+	using state = R::state;
+	using result = R::result;
+
+	template<Iterator I>
+	static constexpr auto match(I it, state& state) -> std::optional<size_t>
+	{
+		return R::match(it, state);
+	}
+
+	template<Iterator I>
+	static constexpr auto match_result(I it, state& state) -> std::optional<std::pair<size_t, result>>
+	{
+		return R::match_result(it, state);
+	}
+	
+}; // struct named
+
 // TODO: class result_aggregator
 // TODO: class state_aggregator
 // TODO: partial result
@@ -456,6 +517,79 @@ struct result_aggregator
 		return {};
 	}
 }; // struct result_aggregator
+
+namespace detail
+{
+template <literal S, size_t N = 0>
+static consteval bool has_next_key()
+{
+	if constexpr (S[N] == '.')
+		return true;
+	else if constexpr (N + 1 < S.size())
+		return has_next_key<S, N + 1>();
+	else
+		return false;
+}
+
+template <literal Key>
+static consteval auto make_key()
+{
+	if constexpr  (Key[0] >= '0' && Key[0] <= '9')
+	{
+		std::size_t i{};
+
+		for (const auto pos : std::ranges::iota_view{std::size_t{}, Key.size()})
+		{
+			i = i * 10 + Key[pos] - '0';
+		}
+		return i;
+	}
+	return Key;
+}
+
+template <literal S, size_t N = 0>
+static consteval auto get_next_key()
+{
+	if constexpr (S[N] == '.')
+	{
+		static_assert(N + 1 < S.size(), "Invalid key");
+		return std::make_pair(S.template substr<0, N>(), S.template substr<N + 1, S.size()>());
+	}
+	else if constexpr (N + 1 < S.size())
+	{
+		return get_next_key<S, N + 1>();
+	}
+	else
+	{
+		[]<bool v>()
+		{
+			static_assert(v, "Failed to split");
+		}.template operator()<false>();
+	}
+}
+} // namespace detail
+
+template <literal Key, typename R>
+static constexpr decltype(auto) get(R&& r)
+{
+	if constexpr (detail::has_next_key<Key>())
+	{
+		static constexpr auto val = detail::get_next_key<Key>();
+		static constexpr auto key = detail::make_key<val.first>();
+//		if constexpr (std::is_same_v<size_t, decltype(key)>)
+//		{
+//
+//		}
+//		else
+		{
+			return get<val.second>(get<>);
+		}
+	}
+	else
+	{
+
+	}
+}
 
 } // namespace automata
 
