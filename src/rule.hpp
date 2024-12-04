@@ -3,6 +3,7 @@
 
 #include "iterator.hpp"
 #include "utils.hpp"
+#include <iostream>
 #include <variant>
 #include <tuple>
 #include <limits>
@@ -198,8 +199,9 @@ struct any
  * If the specified rule matches, this rule will return `nullopt_t{}` to stop further matches
  *
  * @tparam R Rule to exclude from matching
+ * @tparam Step Amount to advance on success
  */
-template<rule R>
+template<rule R, std::size_t Step = 1>
 struct exclude
 {
 	static constexpr inline auto name = literal<8>{"exclude"};
@@ -213,7 +215,7 @@ struct exclude
 	{
 		if (const auto res = R::match(it, state); res.has_value())
 			return {};
-		return { 0 };
+		return { Step };
 	}
 
 	template<Iterator I>
@@ -222,7 +224,7 @@ struct exclude
 	{
 		if (const auto res = R::match(it, state); res.has_value())
 			return {};
-		return { { 0, {} } };
+		return { { Step, {} } };
 	}
 }; // struct exclude
 
@@ -252,11 +254,12 @@ struct repeat
 	static constexpr auto match(I it, state& state) noexcept
 	  -> std::optional<std::size_t>
 	{
+		std::size_t i = 0;
 		std::size_t n = 0;
 		std::size_t offset = 0;
 
 		while (!it.at_end()) {
-			it = it.move(offset);
+			it = it.move(i);
 			if (const auto res = C::template match(it, state);
 			    !res.has_value()) {
 				if (n >= Min)
@@ -264,8 +267,9 @@ struct repeat
 				else
 					return {};
 			} else
-				offset += res.value();
+				i = res.value();
 			++n;
+			offset += i;
 			if (n == Max)
 				return { offset };
 		}
@@ -279,8 +283,8 @@ struct repeat
 	static constexpr auto match_result(I it, state& state) noexcept
 	  -> std::optional<std::pair<std::size_t, result>>
 	{
-		std::size_t n = 0;
 		std::vector<typename C::result> res;
+		std::size_t n = 0;
 		std::size_t i = 0;
 		std::size_t offset = 0;
 
@@ -484,7 +488,7 @@ struct result_aggregator
 	using comp = compound<Rs...>;
 	using result = std::invoke_result_t<F,
 	                                    std::pair<utf8_iterator, utf8_iterator>,
-	                                    typename comp::result>;
+	                                    typename comp::result&&>;
 	using state = comp::state;
 
 	template<Iterator I>

@@ -149,13 +149,14 @@ get_impl(R&& r)
 				return get_impl<Key, N + 1, R>(std::forward<R>(r));
 			}
 		} else {
-			if constexpr (key_compare<key, 0>()) {
+			if constexpr (std::is_same_v<std::remove_cvref_t<decltype(key)>,
+		                             std::size_t>) {
 				if constexpr (is_named<
 				                std::tuple_element_t<key,
 				                                     std::remove_cvref_t<R>>>) {
-					return (std::forward<R>(r).result);
+					return (std::get<key>(std::forward<R>(r)).result);
 				} else {
-					return (std::forward<R>(r));
+					return (std::get<key>(std::forward<R>(r)));
 				}
 			} else if constexpr (is_named<std::remove_cvref_t<R>> &&
 			                     key_compare<key, std::remove_cvref_t<R>>()) {

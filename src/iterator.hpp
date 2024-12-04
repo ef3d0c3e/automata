@@ -14,6 +14,7 @@ concept Iterator = requires(I& it, const I& it2, ssize_t n) {
 	{ it.move(n) } -> std::same_as<I>;
 	{ it.next() } -> std::same_as<I>;
 	{ it.peek(n) } -> std::same_as<std::string_view>;
+	{ it.until(it2) } -> std::same_as<std::string_view>;
 	{ it.at_start() } -> std::same_as<bool>;
 	{ it.at_end() } -> std::same_as<bool>;
 	{ it != it2 } -> std::same_as<bool>;
@@ -53,7 +54,7 @@ struct utf8_iterator
 
 	bool at_start() const { return pos == 0; }
 
-	bool at_end() const { return pos >= (ssize_t)str.size() - 1; }
+	bool at_end() const { return pos >= (ssize_t)str.size(); }
 
 	utf8_iterator next() { return utf8_iterator{ pos_at(pos + 1), str }; }
 
@@ -70,6 +71,12 @@ struct utf8_iterator
 	{
 		return std::string_view{ str.data() + pos,
 			                     str.data() + pos_at(pos + n) };
+	}
+
+	std::string_view until(const utf8_iterator& other)
+	{
+		return std::string_view{ str.data() + pos,
+			                     str.data() + other.pos };
 	}
 
 	friend bool operator==(const utf8_iterator& self,
