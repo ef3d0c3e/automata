@@ -142,10 +142,12 @@ struct literal
 	}
 }; // struct literal
 
-template <typename T>
+template<typename T>
 concept is_literal = requires {
-    // Check that T is a template instantiation of literal
-    requires ([]<std::size_t N>(literal<N>*) {})(static_cast<T*>(nullptr));
+	{
+		([]<std::size_t N>(const literal<N>*) {})(
+		  static_cast<const std::remove_cvref_t<T>*>(nullptr))
+	};
 };
 
 template<class T>
@@ -162,11 +164,6 @@ concept Rule = requires(T::state& state) {
 	// match_result<I>(it, state) } ->
 	// std::same_as<std::optional<std::pair<std::size_t, typename T::result>>>;
 }; // concept Rule
-
-template<class T>
-concept NamedResult = requires(T t) {
-	{ std::tuple_element_t<0, T>::value };
-}; // concept NamedRule
 
 template<literal S>
 struct string_match
@@ -455,9 +452,12 @@ struct ignore_result
 template<literal N, Rule R>
 struct named
 {
-	static constexpr inline auto name = N;
 	using state = R::state;
-	using result = std::tuple<std::pair<std::integral_constant<decltype(N), N>, typename R::result>>;
+	struct result
+	{
+		static inline constexpr auto name = N;
+		R::result result;
+	};
 
 	template<Iterator I>
 	static constexpr auto match(I it, state& state) -> std::optional<size_t>
@@ -470,7 +470,8 @@ struct named
 	  -> std::optional<std::pair<size_t, result>>
 	{
 		if (const auto res = R::match_result(it, state); res.has_value())
-			return std::make_pair(res.value().first, result(std::integral_constant<decltype(N), N>{}, std::move(res.value().second)));
+			return std::make_pair(res.value().first,
+			                      result{ std::move(res.value().second) });
 		return {};
 	}
 
@@ -593,8 +594,7 @@ make_key()
 			i = i * 10 + Key[pos] - '0';
 		}
 		return i;
-	}
-	else
+	} else
 		return Key;
 }
 
@@ -615,64 +615,111 @@ get_next_key()
 	}
 }
 
-template <typename T>
-concept Named = requires()
-{
-	{ is_literal<std::tuple_element_t<0, T>> };
+template<typename T>
+concept Named = requires() {
+	requires is_literal<std::remove_cvref_t<decltype(T::name)>>;
 };
 
-template <literal Key, size_t N, typename R>
-static constexpr decltype(auto) get_impl(R&& r)
-{
-	if constexpr (has_next_key<Key>())
+/// @brief Checks if a type implements tuple_element
+template<class T, std::size_t I>
+concept has_tuple_element = requires(T t) {
+	typename std::tuple_element_t<I, std::remove_const_t<T>>;
 	{
-		static constexpr auto val = detail::get_next_key<Key>();
-		static constexpr auto key = detail::make_key<val.first>();
+		std::get<I>(t)
+	} -> std::convertible_to<const std::tuple_element_t<I, T>&>;
+};
 
-		if constexpr (std::is_same_v<std::remove_cvref_t<decltype(key)>, std::size_t>)
-		{
-			if constexpr (Named<std::tuple_element_t<key, std::remove_cvref_t<R>>>)
-			{
-				return get_impl<val.second, 0>(std::get<key>(std::forward<R>(r)).second);
-			}
-			else
-			{
-				return get_impl<val.second, 0>(std::get<key>(std::forward<R>(r)));
-			}
-		}
-		else if constexpr (
-				Named<std::tuple_element_t<N, std::remove_cvref_t<R>>> &&
-				std::tuple_element_t<0, std::tuple_element_t<N, std::remove_cvref_t<R>>>::value == key) {
-			//return std::get<N>(r).second;
-			return get_impl<val.second, 0>(std::get<N>(std::forward<R>(r)).second);
-		}
-		else if constexpr (N + 1 < std::tuple_size_v<std::remove_cvref_t<R>>)
-		{
-			return get_impl<Key, N + 1>(std::forward<R>(r));
-		}
+/// @brief Checks if a type is tuple-like
+template<class T>
+concept tuple_like = requires(T t) {
+	requires !std::is_reference_v<T>;
+	typename std::tuple_size<T>::type;
+	requires std::derived_from<
+	  std::tuple_size<T>,
+	  std::integral_constant<std::size_t, std::tuple_size_v<T>>>;
+} && []<std::size_t... N>(std::index_sequence<N...>) {
+	return (has_tuple_element<T, N> && ...);
+}(std::make_index_sequence<std::tuple_size_v<T>>());
+
+template<literal key, typename T>
+constexpr bool
+key_compare()
+{
+	if constexpr (Named<std::remove_cvref_t<T>>)
+	{
+		return std::remove_cvref_t<T>::name == key;
 	}
 	else
 	{
+		return false;
+	}
+}
+
+template<std::size_t key, std::size_t val>
+constexpr bool
+key_compare()
+{
+	return val == key;
+}
+
+
+template<literal Key, size_t N, typename R>
+static constexpr decltype(auto)
+get_impl(R&& r)
+{
+	if constexpr (has_next_key<Key>()) {
+		static constexpr auto val = detail::get_next_key<Key>();
+		static constexpr auto key = detail::make_key<val.first>();
+		using T = std::remove_cvref_t<std::tuple_element_t<N, std::remove_cvref_t<R>>>;
+
+		if constexpr (std::is_same_v<std::remove_cvref_t<decltype(key)>,
+		                             std::size_t>) {
+			if constexpr (Named<T>) {
+				return get_impl<val.second, 0>(
+				  std::get<key>(std::forward<R>(r)).result);
+			} else {
+				return get_impl<val.second, 0>(
+				  std::get<key>(std::forward<R>(r)));
+			}
+		} else if constexpr (Named<T> && key_compare<key, T>()) {
+			return get_impl<val.second, 0>(
+			  std::get<N>(std::forward<R>(r)).result);
+		} else if constexpr (N + 1 <
+		                     std::tuple_size_v<std::remove_cvref_t<R>>) {
+			return get_impl<Key, N + 1>(std::forward<R>(r));
+		}
+	} else {
 		static constexpr auto key = detail::make_key<Key>();
-		using T = std::tuple_element_t<N, std::remove_cvref_t<R>>;
-		if constexpr (std::is_same_v<std::remove_cvref_t<decltype(key)>, std::size_t>)
-		{
-			if constexpr (Named<std::tuple_element_t<key, std::remove_cvref_t<R>>>)
-			{
-				return (std::get<key>(std::forward<R>(r)).second);
+		if constexpr (tuple_like<std::remove_cvref_t<R>>) {
+			using T = std::remove_cvref_t<std::tuple_element_t<N, std::remove_cvref_t<R>>>;
+			if constexpr (std::is_same_v<std::remove_cvref_t<decltype(key)>,
+			                             std::size_t>) {
+				if constexpr (Named<
+				                std::tuple_element_t<key,
+				                                     std::remove_cvref_t<R>>>) {
+					return (std::get<key>(std::forward<R>(r)).result);
+				} else {
+					return (std::get<key>(std::forward<R>(r)));
+				}
+			} else if constexpr (Named<T> && key_compare<key, T>()) {
+				return (std::get<N>(std::forward<R>(r)).result);
+			} else if constexpr (N + 1 <
+			                     std::tuple_size_v<std::remove_cvref_t<R>>) {
+				return get_impl<Key, N + 1, R>(std::forward<R>(r));
 			}
-			else
-			{
-				return (std::get<key>(std::forward<R>(r)));
+		} else {
+			if constexpr (key_compare<key, 0>()) {
+				if constexpr (Named<
+				                std::tuple_element_t<key,
+				                                     std::remove_cvref_t<R>>>) {
+					return (std::forward<R>(r).result);
+				} else {
+					return (std::forward<R>(r));
+				}
+			} else if constexpr (Named<std::remove_cvref_t<R>> &&
+			                     key_compare<key, std::remove_cvref_t<R>>()) {
+				return (std::forward<R>(r).result);
 			}
-		}
-		else if constexpr (Named<std::remove_cvref_t<T>> && std::tuple_element_t<0, std::remove_cvref_t<T>>::value == key)
-		{
-			return (std::get<N>(std::forward<R>(r)).second);
-		}
-		else if constexpr (N + 1 < std::tuple_size_v<std::remove_cvref_t<R>>)
-		{
-			return get_impl<Key, N + 1, R>(std::forward<R>(r));
 		}
 	}
 }
@@ -682,33 +729,7 @@ template<literal Key, typename R>
 static constexpr decltype(auto)
 get(R&& r)
 {
-	/*
-	if constexpr (detail::has_next_key<Key>()) {
-		static constexpr auto val = detail::get_next_key<Key>();
-		static constexpr auto key = detail::make_key<val.first>();
-		//		if constexpr (std::is_same_v<size_t, decltype(key)>)
-		//		{
-		//
-		//		}
-		//		else
-		{
-			[&]<size_t... _>(std::index_sequence<_...>) {
-				(
-				  [&]<std::size_t i>() {
-					  if constexpr (
-					    detail::Named<std::tuple_element_t<i, std::remove_cvref_t<R>>> &&
-					    std::tuple_element_t<0, std::tuple_element_t<i, std::remove_cvref_t<R>>>::value == key) {
-						  return get<val.second>(std::get<i>(r));
-					  }
-				  }.template operator()<_>(),
-				  ...);
-			}(std::make_index_sequence<
-			  std::tuple_size_v<std::remove_cvref_t<R>>>{});
-		}
-	} else {
-	}
-	*/
-		return detail::get_impl<Key, 0, R>(std::forward<R>(r));
+	return detail::get_impl<Key, 0, R>(std::forward<R>(r));
 }
 
 } // namespace automata
