@@ -2,6 +2,8 @@
 #define AUTOMATA_HPP
 
 #include <algorithm>
+#include <concepts>
+#include <format>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -151,7 +153,8 @@ concept is_literal = requires {
 };
 
 template<class T>
-concept Rule = requires(T::state& state) {
+concept Rule = requires(T::state& state, utf8_iterator& it) {
+	requires is_literal<std::remove_cvref_t<decltype(T::name)>>;
 	typename T::result;
 	typename T::state;
 
@@ -159,15 +162,23 @@ concept Rule = requires(T::state& state) {
 	{ typename T::result{} } -> std::same_as<typename T::result>;
 	{ typename T::state{} } -> std::same_as<typename T::state>;
 
-	//{ T::template match<I>(it, state) } ->
-	// std::same_as<std::optional<std::size_t>>; { T::template
-	// match_result<I>(it, state) } ->
-	// std::same_as<std::optional<std::pair<std::size_t, typename T::result>>>;
+	{
+		[]<Iterator I>(I& it, T::state& state) {
+			return T::template match<I>(it, state);
+		}(it, state)
+	} -> std::same_as<std::optional<std::size_t>>;
+	{
+		[]<Iterator I>(I& it, T::state& state) {
+			return T::template match_result<I>(it, state);
+		}(it, state)
+	}
+	-> std::same_as<std::optional<std::pair<std::size_t, typename T::result>>>;
 }; // concept Rule
 
 template<literal S>
 struct string_match
 {
+	static constexpr inline auto name = literal<13>{ "string_match" };
 	struct result
 	{};
 	struct state
@@ -194,6 +205,7 @@ struct string_match
 
 struct line_end
 {
+	static constexpr inline auto name = literal<9>{"line_end"};
 	struct result
 	{};
 	struct state
@@ -222,6 +234,7 @@ struct line_end
 
 struct line_begin
 {
+	static constexpr inline auto name = literal<11>{"line_begin"};
 	struct result
 	{};
 	struct state
@@ -251,6 +264,7 @@ struct line_begin
 template<Rule... Rs>
 struct any
 {
+	static constexpr inline auto name = literal<4>{"any"};
 	struct result : std::variant<typename Rs::result...>
 	{
 		size_t n;
@@ -302,6 +316,7 @@ struct any
 template<Rule R>
 struct exclude
 {
+	static constexpr inline auto name = literal<8>{"exclude"};
 	struct result
 	{};
 	using state = typename R::state;
@@ -330,6 +345,7 @@ template<Rule C,
          std::size_t Max = std::numeric_limits<size_t>::max()>
 struct repeat
 {
+	static constexpr inline auto name = literal<7>{"repeat"};
 	struct result
 	{
 		std::size_t n;
@@ -402,6 +418,7 @@ struct repeat
 template<Rule R>
 struct maybe
 {
+	static constexpr inline auto name = literal<6>{"maybe"};
 	struct result : std::optional<typename R::result>
 	{};
 	struct state : R::state
@@ -429,6 +446,7 @@ struct maybe
 template<Rule R>
 struct ignore_result
 {
+	static constexpr inline auto name = literal<14>{"ignore_result"};
 	using state = typename R::state;
 	struct result
 	{};
@@ -452,6 +470,7 @@ struct ignore_result
 template<literal N, Rule R>
 struct named
 {
+	static constexpr inline auto name = literal<6>{"named"};
 	using state = R::state;
 	struct result
 	{
@@ -483,7 +502,7 @@ struct named
 template<Rule... Rs>
 struct compound
 {
-	// TODO:
+	static constexpr inline auto name = literal<9>{"compound"};
 	using result = std::tuple<typename Rs::result...>;
 	using state = std::tuple<typename Rs::state...>;
 
@@ -542,6 +561,7 @@ struct compound
 template<typename F, Rule... Rs>
 struct result_aggregator
 {
+	static constexpr inline auto name = literal<18>{"result_aggregator"};
 	using comp = compound<Rs...>;
 	using result = std::invoke_result_t<F,
 	                                    std::pair<utf8_iterator, utf8_iterator>,
@@ -616,9 +636,8 @@ get_next_key()
 }
 
 template<typename T>
-concept Named = requires() {
-	requires is_literal<std::remove_cvref_t<decltype(T::name)>>;
-};
+concept Named =
+  requires() { requires is_literal<std::remove_cvref_t<decltype(T::name)>>; };
 
 /// @brief Checks if a type implements tuple_element
 template<class T, std::size_t I>
@@ -645,12 +664,9 @@ template<literal key, typename T>
 constexpr bool
 key_compare()
 {
-	if constexpr (Named<std::remove_cvref_t<T>>)
-	{
+	if constexpr (Named<std::remove_cvref_t<T>>) {
 		return std::remove_cvref_t<T>::name == key;
-	}
-	else
-	{
+	} else {
 		return false;
 	}
 }
@@ -662,7 +678,6 @@ key_compare()
 	return val == key;
 }
 
-
 template<literal Key, size_t N, typename R>
 static constexpr decltype(auto)
 get_impl(R&& r)
@@ -670,7 +685,8 @@ get_impl(R&& r)
 	if constexpr (has_next_key<Key>()) {
 		static constexpr auto val = detail::get_next_key<Key>();
 		static constexpr auto key = detail::make_key<val.first>();
-		using T = std::remove_cvref_t<std::tuple_element_t<N, std::remove_cvref_t<R>>>;
+		using T =
+		  std::remove_cvref_t<std::tuple_element_t<N, std::remove_cvref_t<R>>>;
 
 		if constexpr (std::is_same_v<std::remove_cvref_t<decltype(key)>,
 		                             std::size_t>) {
@@ -691,7 +707,8 @@ get_impl(R&& r)
 	} else {
 		static constexpr auto key = detail::make_key<Key>();
 		if constexpr (tuple_like<std::remove_cvref_t<R>>) {
-			using T = std::remove_cvref_t<std::tuple_element_t<N, std::remove_cvref_t<R>>>;
+			using T = std::remove_cvref_t<
+			  std::tuple_element_t<N, std::remove_cvref_t<R>>>;
 			if constexpr (std::is_same_v<std::remove_cvref_t<decltype(key)>,
 			                             std::size_t>) {
 				if constexpr (Named<
@@ -730,6 +747,12 @@ static constexpr decltype(auto)
 get(R&& r)
 {
 	return detail::get_impl<Key, 0, R>(std::forward<R>(r));
+}
+
+template<Rule R, typename T>
+static void
+print_result(const T& t)
+{
 }
 
 } // namespace automata
